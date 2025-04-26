@@ -1,0 +1,5 @@
+[Unit]
+Description=macrolink
+
+[Service]
+ExecStart=/usr/local/bin/macrolink daemon

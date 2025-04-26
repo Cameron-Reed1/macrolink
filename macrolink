@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import usb.core
+import struct
+from time import sleep
+
+
+COMPUTER_ID = 1
+
+
+RESET_INTERFACE_SUBCLASS = 0x00
+RESET_INTERFACE_PROTOCOL = 0x01
+
+
+REQ_TYPE_CLASS_OUT = 0x21  # Recipient: 2 (Interface), Request Type: 1 (Class),  Direction: 0 (OUT)
+REQ_TYPE_VEND_OUT = 0x40   # Recipient: 0 (Device),    Request Type: 2 (Vendor), Direction: 0 (OUT)
+REQ_TYPE_VEND_IN = 0xC0    # Recipient: 0 (Device),    Request Type: 2 (Vendor), Direction: 1 (IN)
+
+CMD_OUT_REBOOT_BOOTSEL = 1
+CMD_OUT_REBOOT_FLASH = 2
+
+CMD_OUT_SET_COMPUTER_ID = 1
+CMD_OUT_SET_CONFIG_SLOT = 2
+
+CMD_IN_GET_CMD_NUM = 1
+CMD_IN_GET_CMDS = 2
+
+
+def print_usage():
+    print(f"Usage: {sys.argv[0]} [bootsel/reboot/id/config/get_cmd/daemon] <arg>")
+
+
+def is_reboot_interface(interface: usb.core.Interface):
+    return interface.bInterfaceClass == 0xFF \
+        and interface.bInterfaceSubClass == RESET_INTERFACE_SUBCLASS \
+        and interface.bInterfaceProtocol == RESET_INTERFACE_PROTOCOL
+
+
+def find_reboot_interface(dev: usb.core.Device):
+    interfaces = dev.get_active_configuration().interfaces()
+    for i in range(len(interfaces)):
+        if is_reboot_interface(interfaces[i]):
+            return i
+
+
+def send_command(dev: usb.core.Device, bmRequestType, bRequest, wValue=0, wIndex=0):
+    try:
+        dev.ctrl_transfer(bmRequestType, bRequest, wValue, wIndex, None, 100)
+    except usb.core.USBTimeoutError:
+        pass
+
+
+def main():
+    if len(sys.argv) == 1:
+        print_usage()
+        return
+
+    dev = usb.core.find(idVendor=0x2e8a, idProduct=0x000a)
+    if dev is None:
+        print("Device not found")
+    else:
+        try:
+            if sys.argv[1] == "bootsel":
+                if len(sys.argv) == 3:
+                    reboot_to_bootsel(dev, int(sys.argv[2]))
+                else:
+                    reboot_to_bootsel(dev, 0)
+            elif sys.argv[1] == "reboot":
+                reboot(dev)
+            elif sys.argv[1] == "id":
+                set_id(dev, int(sys.argv[2]))
+            elif sys.argv[1] == "config":
+                set_slot(dev, int(sys.argv[2]))
+            elif sys.argv[1] == "get_cmd":
+                read_cmd(dev)
+            elif sys.argv[1] == "daemon":
+                daemon(dev)
+            else:
+                print(f"Invalid command {sys.argv[1]}")
+                print_usage()
+        except usb.core.USBError as e:
+            print(f"Failed: {e}")
+
+
+def reboot_to_bootsel(dev: usb.core.Device, int_mask: int):
+    interface = find_reboot_interface(dev)
+    if interface is not None:
+        print("Rebooting device")
+        send_command(dev, REQ_TYPE_CLASS_OUT, CMD_OUT_REBOOT_BOOTSEL, int_mask, interface)
+    else:
+        print("Failed to find reboot interface")
+
+
+def reboot(dev: usb.core.Device):
+    interface = find_reboot_interface(dev)
+    if interface is not None:
+        print("Rebooting device")
+        send_command(dev, REQ_TYPE_CLASS_OUT, CMD_OUT_REBOOT_FLASH, 0, interface)
+    else:
+        print("Failed to find reboot interface")
+
+
+def set_id(dev: usb.core.Device, id: int):
+    print(f"Setting computer id to {id}")
+    send_command(dev, REQ_TYPE_VEND_OUT, CMD_OUT_SET_COMPUTER_ID, id, 0)
+
+
+def set_slot(dev: usb.core.Device, slot: int):
+    print(f"Setting config slot to {slot}")
+    send_command(dev, REQ_TYPE_VEND_OUT, CMD_OUT_SET_CONFIG_SLOT, slot - 1, 0)
+
+
+def read_cmd(dev: usb.core.Device):
+    print("Attempting to read command from device")
+    num_cmds = dev.ctrl_transfer(REQ_TYPE_VEND_IN, CMD_IN_GET_CMD_NUM, data_or_wLength=1)
+    print(num_cmds)
+    if num_cmds[0] == 0:
+        print("No commands to be read")
+    else:
+        cmds = dev.ctrl_transfer(REQ_TYPE_VEND_IN, CMD_IN_GET_CMDS, data_or_wLength=4 * num_cmds[0])
+        print(cmds)
+
+
+def daemon(dev: usb.core.Device):
+    set_id(dev, COMPUTER_ID)
+
+    print("Starting daemon")
+    while True:
+        try:
+            num_cmds = dev.ctrl_transfer(REQ_TYPE_VEND_IN, CMD_IN_GET_CMD_NUM, data_or_wLength=1)[0]
+            if num_cmds > 0:
+                cmds = dev.ctrl_transfer(REQ_TYPE_VEND_IN, CMD_IN_GET_CMDS, data_or_wLength=4 * num_cmds)
+                for i in range(num_cmds):
+                    cmd = struct.unpack_from('<2H', cmds, i * 4)
+                    handle_cmd(cmd[1], cmd[0])
+
+            sleep(0.1)
+        except KeyboardInterrupt:
+            print()
+            break
+
+
+def handle_cmd(category: int, command: int):
+    print(f"Category: {category:#06x}, Command: {command:#06x}")
+    if category == 0x0000:
+        match command:
+            case 0x0000:
+                os.system("brightnessctl set 5%- 2>&1 > /dev/null")
+            case 0x0001:
+                os.system("brightnessctl set 5%+ 2>&1 > /dev/null")
+
+
+if __name__ == "__main__":
+    main()
