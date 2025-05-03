@@ -4,6 +4,7 @@ import os
 import sys
 import usb.core
 import struct
+import importlib
 from time import sleep
 
 
@@ -26,6 +27,25 @@ CMD_OUT_SET_CONFIG_SLOT = 2
 
 CMD_IN_GET_CMD_NUM = 1
 CMD_IN_GET_CMDS = 2
+
+
+class Plugin:
+    def __init__(self, plugin_mod):
+        if not hasattr(plugin_mod, "action_map"):
+            raise ValueError("Cannot load plugin. Missing 'action_map'")
+        if not isinstance(plugin_mod.action_map, dict):
+            raise ValueError("Cannot load plugin. 'action_map' is not a dictionary")
+
+        if not hasattr(plugin_mod, "PLUGIN_CATEGORY"):
+            raise ValueError("Cannot load plugin. Missing 'PLUGIN_CATEGORY'")
+        if not isinstance(plugin_mod.PLUGIN_CATEGORY, int) or plugin_mod.PLUGIN_CATEGORY < 0x0000 or plugin_mod.PLUGIN_CATEGORY > 0xFFFF:
+            raise ValueError("Cannot load plugin. 'PLUGIN_CATEGORY' is not an integer between 0x0000 and 0xFFFF")
+
+        self.actions = plugin_mod.action_map
+        self.category = plugin_mod.PLUGIN_CATEGORY
+
+
+plugins: dict[Plugin] = {}
 
 
 def print_usage():
@@ -124,6 +144,9 @@ def read_cmd(dev: usb.core.Device):
 
 
 def daemon(dev: usb.core.Device):
+    plugin_dir = "/home/cameron-arch/.config/macrolink/plugins/"
+    load_plugins_in_dir(plugin_dir)
+
     set_id(dev, COMPUTER_ID)
 
     print("Starting daemon")
@@ -134,7 +157,10 @@ def daemon(dev: usb.core.Device):
                 cmds = dev.ctrl_transfer(REQ_TYPE_VEND_IN, CMD_IN_GET_CMDS, data_or_wLength=4 * num_cmds)
                 for i in range(num_cmds):
                     cmd = struct.unpack_from('<2H', cmds, i * 4)
-                    handle_cmd(cmd[1], cmd[0])
+                    try:
+                        handle_cmd(cmd[1], cmd[0])
+                    except Exception as e:
+                        print(f"Failed to handle command {cmd[1]:#06x}:{cmd[0]:#06x}:\n\t{e}")
 
             sleep(0.1)
         except KeyboardInterrupt:
@@ -143,13 +169,44 @@ def daemon(dev: usb.core.Device):
 
 
 def handle_cmd(category: int, command: int):
+    global plugins
+
     print(f"Category: {category:#06x}, Command: {command:#06x}")
-    if category == 0x0000:
-        match command:
-            case 0x0000:
-                os.system("brightnessctl set 5%- 2>&1 > /dev/null")
-            case 0x0001:
-                os.system("brightnessctl set 5%+ 2>&1 > /dev/null")
+
+    plugin: Plugin = plugins.get(category, None)
+    if plugin is not None:
+        action = plugin.actions.get(command, None)
+        if action is not None:
+            action()
+
+
+def load_plugins_in_dir(path: str):
+    nodes = os.listdir(path)
+
+    for node in nodes:
+        node_path = os.path.join(path, node)
+        if os.path.isfile(node_path) and os.path.splitext(node_path)[1] == '.py':
+            load_plugin(node_path)
+
+
+def load_plugin(path: str):
+    global plugins
+
+    old_sys_path = sys.path
+    sys.path.insert(0, os.path.dirname(path))
+    module_name = os.path.splitext(os.path.basename(path))[0]
+
+    print(f"Loading plugin {module_name}")
+    try:
+        module = importlib.import_module(module_name)
+        plugin = Plugin(module)
+        if plugins.get(plugin.category, None) is not None:
+            raise ValueError(f"Plugin with category id {plugin.category} has already been loaded")
+        plugins[plugin.category] = plugin
+    except Exception as e:
+        print(f"Failed to load plugin at path {path}:\n\t{e}")
+    finally:
+        sys.path = old_sys_path
 
 
 if __name__ == "__main__":
